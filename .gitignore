@@ -1,0 +1,23 @@
+# Terraform working directory (provider binaries, huge)
+.terraform/
+
+# State files 
+*.tfstate
+*.tfstate.*
+
+# Crash logs
+crash.log
+
+# Variable files that may hold real values/secrets
+*.tfvars
+*.tfvars.json
+
+# Lock info files
+.terraform.tfstate.lock.info
+
+# Editor cruft
+.vscode/
+
+# Python
+__pycache--/
+*.pyc

@@ -1,0 +1,13 @@
+# Keep the build context minimal
+.git
+.gitignore
+*.md
+docs/
+images/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+__pycache__/
+*.pyc
+.vscode/
