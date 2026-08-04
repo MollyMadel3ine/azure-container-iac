@@ -32,7 +32,7 @@ def root():
     return {
         "app": "container-demo",
         "environment": ENVIRONMENT,
-        "message": "Containerized IaC demo - see /health",
+        "message": "Containerized IaC demo - view /health",
     }
 
 
