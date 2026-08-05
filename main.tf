@@ -62,7 +62,19 @@ resource "azurerm_user_assigned_identity" "app" {
 }
 
 # ---------------- Key Vault + demo secret ----------------
+# Network ACL deliberately absent: this architecture's security
+# boundary is identity (RBAC-only auth, managed identity, disabled
+# shared keys), not network. A Deny-default ACL would block the
+# Container App (dynamic egress IPs) and hosted pipeline agents.
+# The network-boundary alternative - VNet integration + private
+# endpoint - is demonstrated in the companion project azure-webapp-iac.
+#
+# Purge protection deliberately off: this demo environment is
+# destroyed and rebuilt routinely, and purge protection locks vault
+# names for 90 days after destroy. A production vault would enable it.
 
+#tfsec:ignore:azure-keyvault-specify-network-acl
+#tfsec:ignore:azure-keyvault-no-purge
 resource "azurerm_key_vault" "this" {
   name                       = "${var.kv_name_prefix}${var.environment_name}"
   location                   = azurerm_resource_group.main.location
@@ -77,9 +89,11 @@ resource "azurerm_key_vault" "this" {
 # A benign demo secret the app reads at request time, proof of
 # identity-based access with a visible payoff.
 resource "azurerm_key_vault_secret" "demo" {
-  name         = "demo-message"
-  value        = "Hello from ${var.environment_name} Key Vault - no passwords were used"
-  key_vault_id = azurerm_key_vault.this.id
+  name            = "demo-message"
+  value           = "Hello from ${var.environment_name} Key Vault - no passwords were used"
+  key_vault_id    = azurerm_key_vault.this.id
+  content_type    = "text/plain"
+  expiration_date = "2027-12-31T00:00:00Z"
 
   # The identity running terraform needs KV data-plane rights before
   # it can write the secret; see the Secrets Officer assignment below.
@@ -94,6 +108,7 @@ resource "azurerm_storage_account" "this" {
   location                        = azurerm_resource_group.main.location
   account_tier                    = "Standard"
   account_replication_type        = "LRS"
+  min_tls_version                 = "TLS1_2"
   shared_access_key_enabled       = false # RBAC-only: keys don't merely go unused, they don't work
   allow_nested_items_to_be_public = false
   tags                            = local.tags
