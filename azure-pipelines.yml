@@ -1,16 +1,13 @@
 # ------------------------------------------------------------------
-# azure-pipelines.yml — container-app-iac
+# azure-pipelines.yml — Phase 3: the promotion flow.
 #
-# Four stages:
-#   Validate : fmt, validate, tfsec (pattern ported from project #1)
-#   Build    : docker build, tag with the git SHA, push to ACR
-#   Plan     : terraform plan with the new image tag as a variable —
-#              app delivery IS an infrastructure change
-#   Apply    : gated on the Prod1 environment, applies the reviewed
-#              plan, then SMOKE TESTS its own deployment and fails
-#              the run if the app doesn't answer with the new tag.
+#   Validate → Build (ONE image) → DeployDev (auto: plan+apply+smoke)
+#            → PlanProd → [Prod1 approval] → ApplyProd (+ smoke)
 #
-# PRs run Validate + Build + Plan. Main runs everything.
+# The same SHA-tagged image that passed dev's smoke test is what prod
+# receives — build once, promote the artifact. Dev deploys without
+# approval (that's what dev is for); the human gate sits between
+# environments.
 # ------------------------------------------------------------------
 
 trigger:
@@ -24,17 +21,17 @@ pr:
       - main
 
 variables:
-  - group: terraform-credentials # ARM_CLIENT_ID / SECRET / TENANT_ID / SUBSCRIPTION_ID
+  - group: terraform-credentials
   - name: acrName
-    value: acrcontainerdemomolly # ← your registry (short name)
+    value: acrcontainerdemomolly
   - name: acrServer
     value: acrcontainerdemomolly.azurecr.io
   - name: imageRepo
     value: container-demo
-  - name: imageTag
-    value: $(Build.SourceVersion) # the git SHA — immutable, traceable
   - name: fullImage
-    value: $(acrServer)/$(imageRepo):$(imageTag)
+    value: $(acrServer)/$(imageRepo):$(Build.SourceVersion)
+  - name: tfVersion
+    value: 1.9.8
 
 pool:
   vmImage: ubuntu-latest
@@ -45,48 +42,36 @@ stages:
     displayName: "Validate & security scan"
     jobs:
       - job: validate
-        displayName: "fmt, validate, tfsec"
         steps:
           - script: |
-              TF_VERSION=1.9.8
-              curl -sSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
+              curl -sSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/$(tfVersion)/terraform_$(tfVersion)_linux_amd64.zip
               sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
-              terraform -version
             displayName: "install terraform (pinned)"
 
           - script: terraform fmt -check -recursive -diff
             displayName: "terraform fmt"
 
-          - script: terraform init -backend=false
-            displayName: "terraform init (no backend)"
-
-          - script: terraform validate
+          - script: terraform init -backend=false && terraform validate
             displayName: "terraform validate"
 
           - script: |
               TFSEC_VERSION=1.28.11
               curl -sSL -o /tmp/tfsec https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/tfsec-linux-amd64
-              chmod +x /tmp/tfsec
-              sudo mv /tmp/tfsec /usr/local/bin/tfsec
-              tfsec --version
+              chmod +x /tmp/tfsec && sudo mv /tmp/tfsec /usr/local/bin/tfsec
               tfsec . --no-color
             displayName: "tfsec security scan (pinned)"
 
   # ----------------------------------------------------------------
   - stage: Build
-    displayName: "Build & push image"
+    displayName: "Build & push image (once)"
     dependsOn: Validate
     jobs:
       - job: build
-        displayName: "docker build → ACR"
         steps:
           - script: |
-              az login --service-principal \
-                --username "$ARM_CLIENT_ID" \
-                --password "$ARM_CLIENT_SECRET" \
-                --tenant "$ARM_TENANT_ID" --output none
+              az login --service-principal --username "$ARM_CLIENT_ID" --password "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" --output none
               az acr login --name $(acrName)
-            displayName: "authenticate to ACR (as pipeline SP)"
+            displayName: "authenticate to ACR"
             env:
               ARM_CLIENT_ID: $(ARM_CLIENT_ID)
               ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
@@ -95,58 +80,102 @@ stages:
           - script: |
               docker build -t $(fullImage) .
               docker push $(fullImage)
-            displayName: "build and push $(imageTag)"
+            displayName: "build and push $(Build.SourceVersion)"
 
   # ----------------------------------------------------------------
-  - stage: Plan
-    displayName: "Terraform plan (new image)"
+  - stage: DeployDev
+    displayName: "Deploy dev (auto) + smoke test"
     dependsOn: Build
-    jobs:
-      - job: plan
-        displayName: "plan with SHA-tagged image"
-        steps:
-          - script: |
-              TF_VERSION=1.9.8
-              curl -sSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
-              sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
-            displayName: "install terraform (pinned)"
-
-          - script: terraform init
-            displayName: "terraform init (remote state)"
-            env:
-              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
-              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
-              ARM_TENANT_ID: $(ARM_TENANT_ID)
-              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
-
-          - script: terraform plan -input=false -var="container_image=$(fullImage)" -out=$(Build.ArtifactStagingDirectory)/tfplan
-            displayName: "terraform plan"
-            env:
-              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
-              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
-              ARM_TENANT_ID: $(ARM_TENANT_ID)
-              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
-
-          - script: terraform show -no-color $(Build.ArtifactStagingDirectory)/tfplan
-            displayName: "show plan (for review)"
-            env:
-              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
-              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
-              ARM_TENANT_ID: $(ARM_TENANT_ID)
-              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
-
-          - publish: $(Build.ArtifactStagingDirectory)/tfplan
-            artifact: tfplan
-            displayName: "publish plan artifact"
-
-  # ----------------------------------------------------------------
-  - stage: Apply
-    displayName: "Apply & smoke test (gated)"
-    dependsOn: Plan
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
-      - deployment: apply
-        displayName: "apply reviewed plan, verify deployment"
+      - job: dev
+        steps:
+          - script: |
+              curl -sSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/$(tfVersion)/terraform_$(tfVersion)_linux_amd64.zip
+              sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
+            displayName: "install terraform"
+
+          - script: terraform init -backend-config="key=container-app-dev.tfstate"
+            displayName: "init (dev state)"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          - script: |
+              terraform plan -input=false -var-file=dev.tfvars -var="container_image=$(fullImage)" -out=devplan
+              terraform show -no-color devplan
+              terraform apply -input=false devplan
+            displayName: "plan + apply dev"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          - script: |
+              APP_URL=$(terraform output -raw app_url)
+              echo "Smoke testing dev: ${APP_URL}/health"
+              for i in $(seq 1 10); do
+                RESPONSE=$(curl -s -w "\n%{http_code}" "${APP_URL}/health" || true)
+                BODY=$(echo "$RESPONSE" | head -n -1); CODE=$(echo "$RESPONSE" | tail -n 1)
+                echo "attempt $i: HTTP $CODE"
+                if [ "$CODE" = "200" ] && echo "$BODY" | grep -q "$(Build.SourceVersion)" && echo "$BODY" | grep -q '"environment":"dev"'; then
+                  echo "DEV smoke test PASSED"; exit 0
+                fi
+                sleep 15
+              done
+              echo "DEV smoke test FAILED"; echo "Last body: $BODY"; exit 1
+            displayName: "smoke test dev"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+  # ----------------------------------------------------------------
+  - stage: PlanProd
+    displayName: "Plan prod (for review)"
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: planprod
+        steps:
+          - script: |
+              curl -sSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/$(tfVersion)/terraform_$(tfVersion)_linux_amd64.zip
+              sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
+            displayName: "install terraform"
+
+          - script: terraform init -backend-config="key=container-app-prod.tfstate"
+            displayName: "init (prod state)"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          - script: |
+              terraform plan -input=false -var-file=prod.tfvars -var="container_image=$(fullImage)" -out=$(Build.ArtifactStagingDirectory)/prodplan
+              terraform show -no-color $(Build.ArtifactStagingDirectory)/prodplan
+            displayName: "plan prod"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+          - publish: $(Build.ArtifactStagingDirectory)/prodplan
+            artifact: prodplan
+            displayName: "publish prod plan"
+
+  # ----------------------------------------------------------------
+  - stage: ApplyProd
+    displayName: "Promote to prod (gated) + smoke test"
+    dependsOn: PlanProd
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: prod
         environment: Prod1
         strategy:
           runOnce:
@@ -155,51 +184,43 @@ stages:
                 - checkout: self
 
                 - download: current
-                  artifact: tfplan
-                  displayName: "download reviewed plan"
+                  artifact: prodplan
 
                 - script: |
-                    TF_VERSION=1.9.8
-                    curl -sSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
+                    curl -sSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/$(tfVersion)/terraform_$(tfVersion)_linux_amd64.zip
                     sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
-                  displayName: "install terraform (pinned)"
+                  displayName: "install terraform"
 
-                - script: terraform init
-                  displayName: "terraform init"
+                - script: terraform init -backend-config="key=container-app-prod.tfstate"
+                  displayName: "init (prod state)"
                   env:
                     ARM_CLIENT_ID: $(ARM_CLIENT_ID)
                     ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
                     ARM_TENANT_ID: $(ARM_TENANT_ID)
                     ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
 
-                - script: terraform apply -input=false $(Pipeline.Workspace)/tfplan/tfplan
-                  displayName: "terraform apply (reviewed plan)"
+                - script: terraform apply -input=false $(Pipeline.Workspace)/prodplan/prodplan
+                  displayName: "apply reviewed prod plan"
                   env:
                     ARM_CLIENT_ID: $(ARM_CLIENT_ID)
                     ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
                     ARM_TENANT_ID: $(ARM_TENANT_ID)
                     ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
 
-                # ---- The smoke test: the pipeline verifies itself ----
-                # Retries accommodate scale-from-zero cold starts.
                 - script: |
                     APP_URL=$(terraform output -raw app_url)
-                    echo "Smoke testing ${APP_URL}/health for tag $(imageTag)"
+                    echo "Smoke testing prod: ${APP_URL}/health"
                     for i in $(seq 1 10); do
                       RESPONSE=$(curl -s -w "\n%{http_code}" "${APP_URL}/health" || true)
-                      BODY=$(echo "$RESPONSE" | head -n -1)
-                      CODE=$(echo "$RESPONSE" | tail -n 1)
+                      BODY=$(echo "$RESPONSE" | head -n -1); CODE=$(echo "$RESPONSE" | tail -n 1)
                       echo "attempt $i: HTTP $CODE"
-                      if [ "$CODE" = "200" ] && echo "$BODY" | grep -q "$(imageTag)"; then
-                        echo "Smoke test PASSED: app is healthy and running $(imageTag)"
-                        exit 0
+                      if [ "$CODE" = "200" ] && echo "$BODY" | grep -q "$(Build.SourceVersion)" && echo "$BODY" | grep -q '"environment":"prod"'; then
+                        echo "PROD smoke test PASSED — promotion complete"; exit 0
                       fi
                       sleep 15
                     done
-                    echo "Smoke test FAILED: app never answered healthy with the deployed tag"
-                    echo "Last body: $BODY"
-                    exit 1
-                  displayName: "smoke test deployment"
+                    echo "PROD smoke test FAILED"; echo "Last body: $BODY"; exit 1
+                  displayName: "smoke test prod"
                   env:
                     ARM_CLIENT_ID: $(ARM_CLIENT_ID)
                     ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
