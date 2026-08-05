@@ -64,14 +64,14 @@ resource "azurerm_user_assigned_identity" "app" {
 # ---------------- Key Vault + demo secret ----------------
 
 resource "azurerm_key_vault" "this" {
-  name                      = "${var.kv_name_prefix}${var.environment_name}"
-  location                  = azurerm_resource_group.main.location
-  resource_group_name       = azurerm_resource_group.main.name
-  tenant_id                 = data.azurerm_client_config.current.tenant_id
-  sku_name                  = "standard"
+  name                       = "${var.kv_name_prefix}${var.environment_name}"
+  location                   = azurerm_resource_group.main.location
+  resource_group_name        = azurerm_resource_group.main.name
+  tenant_id                  = data.azurerm_client_config.current.tenant_id
+  sku_name                   = "standard"
   rbac_authorization_enabled = true # roles, not access policies — consistent with everything else
-  purge_protection_enabled  = false
-  tags                      = local.tags
+  purge_protection_enabled   = false
+  tags                       = local.tags
 }
 
 # A benign demo secret the app reads at request time — proof of
