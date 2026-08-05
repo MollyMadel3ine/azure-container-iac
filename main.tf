@@ -1,9 +1,16 @@
 # ------------------------------------------------------------------
-# Phase 1: registry + Container Apps environment + one container app.
+# Root config: ONE definition, deployed per environment.
 #
-# Deliberately a flat configuration (no modules yet): three resources
-# don't earn module ceremony. Phase 3 restructures for multi-env,
-# and that's when parameterization gets real. Documented trade-off.
+# Which environment this manages is decided at init/plan time, not
+# in code:
+#   terraform init -backend-config="key=container-app-dev.tfstate"
+#   terraform plan -var-file=dev.tfvars
+# Swap dev→prod in both and the same code manages prod, in a fully
+# separate state. A botched dev apply cannot touch prod — prod isn't
+# in the state being written.
+#
+# The ACR lives in shared/ (its own state); this config finds it by
+# name via a data source.
 # ------------------------------------------------------------------
 
 terraform {
@@ -14,13 +21,12 @@ terraform {
     }
   }
 
-  # Same state storage account as project #1 — one bootstrap, many
-  # projects. Only the key differs.
+  # Partial backend: everything except the key, which is supplied per
+  # environment at init time (-backend-config).
   backend "azurerm" {
     resource_group_name  = "rg-tfstate"
-    storage_account_name = "sttfstatemolly" # ← your actual account name
+    storage_account_name = "sttfstatemolly" # ← your state account
     container_name       = "tfstate"
-    key                  = "container-app.tfstate"
   }
 }
 
@@ -28,68 +34,60 @@ provider "azurerm" {
   features {}
 }
 
+# The shared registry, by reference — not managed here.
+data "azurerm_container_registry" "shared" {
+  name                = var.acr_name
+  resource_group_name = "rg-container-shared"
+}
+
 resource "azurerm_resource_group" "main" {
-  name     = "rg-container-demo"
+  name     = "rg-container-demo-${var.environment_name}"
   location = var.location
-  tags     = var.tags
+  tags     = local.tags
 }
 
-# ---------------- Container registry ----------------
-# admin_enabled is the Phase 1 shortcut: username/password auth for
-# both the container app's pulls and your local docker push. Phase 4
-# replaces this with managed identity and turns it off — the README
-# tracks that as a known, deliberate stepping stone.
-
-resource "azurerm_container_registry" "this" {
-  name                = var.acr_name # globally unique, alphanumeric ONLY
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
-  sku                 = "Basic"
-  admin_enabled       = true
-  tags                = var.tags
+locals {
+  tags = {
+    project     = "container-app-iac"
+    managed_by  = "terraform"
+    environment = var.environment_name
+  }
 }
-
-# ---------------- Container Apps environment ----------------
-# The "cluster" the apps run in. No Log Analytics wired yet — Phase 5.
 
 resource "azurerm_container_app_environment" "this" {
-  name                = "${var.project_name}-cae"
+  name                = "container-demo-${var.environment_name}-cae"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
-  tags                = var.tags
+  tags                = local.tags
 }
 
-# ---------------- The container app ----------------
-
 resource "azurerm_container_app" "this" {
-  name                         = "${var.project_name}-app"
+  name                         = "container-demo-${var.environment_name}-app"
   container_app_environment_id = azurerm_container_app_environment.this.id
   resource_group_name          = azurerm_resource_group.main.name
   revision_mode                = "Single"
-  tags                         = var.tags
+  tags                         = local.tags
 
-  # Registry credentials: ACR admin user, password held as a Container
-  # Apps secret (referenced by name, never inline).
   registry {
-    server               = azurerm_container_registry.this.login_server
-    username             = azurerm_container_registry.this.admin_username
+    server               = data.azurerm_container_registry.shared.login_server
+    username             = data.azurerm_container_registry.shared.admin_username
     password_secret_name = "acr-password"
   }
 
   secret {
     name  = "acr-password"
-    value = azurerm_container_registry.this.admin_password
+    value = data.azurerm_container_registry.shared.admin_password
   }
 
   template {
-    min_replicas = 0 # scale to zero — the ~$0 idle story
-    max_replicas = 2
+    min_replicas = var.min_replicas # the dev/prod difference, as data
+    max_replicas = var.max_replicas
 
     container {
       name   = "app"
       image  = var.container_image
-      cpu    = 0.25
-      memory = "0.5Gi"
+      cpu    = var.container_cpu
+      memory = var.container_memory
 
       env {
         name  = "APP_ENVIRONMENT"
@@ -98,7 +96,7 @@ resource "azurerm_container_app" "this" {
 
       env {
         name  = "IMAGE_TAG"
-        value = var.container_image # full ref for now; SHA tags in Phase 2
+        value = var.container_image
       }
     }
   }
