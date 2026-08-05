@@ -45,7 +45,7 @@ resource "azurerm_container_registry" "this" {
   resource_group_name = azurerm_resource_group.shared.name
   location            = azurerm_resource_group.shared.location
   sku                 = "Basic"
-  admin_enabled       = true
+  admin_enabled       = false
   tags                = azurerm_resource_group.shared.tags
 }
 
