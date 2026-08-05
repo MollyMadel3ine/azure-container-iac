@@ -1,9 +1,9 @@
 # ------------------------------------------------------------------
-# shared/main.tf — infrastructure BOTH environments depend on.
+# shared/main.tf, infrastructure BOTH environments depend on.
 #
 # One registry, both environments pull the same SHA-tagged image:
 # build once, promote the artifact, never rebuild for prod. This
-# config has its own state (shared.tfstate) and changes rarely —
+# config has its own state (shared.tfstate) and changes rarely,
 # applied manually (like a bootstrap), since the pipeline's job is
 # promoting apps, not managing the registry they come from.
 # ------------------------------------------------------------------
@@ -38,7 +38,7 @@ resource "azurerm_resource_group" "shared" {
   }
 }
 
-# Admin credentials remain the Phase 1 shortcut — Phase 4 replaces
+# Admin credentials remain the Phase 1 shortcut, Phase 4 replaces
 # them with managed identity and disables admin access.
 resource "azurerm_container_registry" "this" {
   name                = "acrcontainerdemomolly" # ← your registry name

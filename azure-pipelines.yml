@@ -1,11 +1,11 @@
 # ------------------------------------------------------------------
-# azure-pipelines.yml — Phase 3: the promotion flow.
+# azure-pipelines.yml Phase 3: the promotion flow.
 #
 #   Validate → Build (ONE image) → DeployDev (auto: plan+apply+smoke)
 #            → PlanProd → [Prod1 approval] → ApplyProd (+ smoke)
 #
 # The same SHA-tagged image that passed dev's smoke test is what prod
-# receives — build once, promote the artifact. Dev deploys without
+# receives, build once, promote the artifact. Dev deploys without
 # approval (that's what dev is for); the human gate sits between
 # environments.
 # ------------------------------------------------------------------
