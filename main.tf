@@ -27,6 +27,7 @@ terraform {
 
 provider "azurerm" {
   features {}
+  storage_use_azuread = true
 }
 
 data "azurerm_container_registry" "shared" {
@@ -150,6 +151,14 @@ resource "azurerm_role_assignment" "pipeline_kv_officer" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
+# The pipeline SP needs blob data-plane rights: with keys disabled and
+# storage_use_azuread on, the provider's own storage operations
+# (readiness polls, container creation) authenticate as the SP.
+resource "azurerm_role_assignment" "pipeline_storage_blob" {
+  scope                = azurerm_storage_account.this.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
 # ---------------- Container Apps ----------------
 
 resource "azurerm_container_app_environment" "this" {
