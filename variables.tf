@@ -1,5 +1,5 @@
 variable "environment_name" {
-  description = "Which environment this deployment is: 'dev' or 'prod'. Drives naming, tagging, and what /health reports. No default on purpose — every plan must state its environment."
+  description = "Which environment this deployment is: 'dev' or 'prod'."
   type        = string
 
   validation {
@@ -21,7 +21,7 @@ variable "acr_name" {
 }
 
 variable "container_image" {
-  description = "Full image reference. Supplied by the pipeline as the SHA-tagged build on every run; for local applies, pass -var or set in the tfvars."
+  description = "Full image reference. Supplied by the pipeline as the SHA-tagged build."
   type        = string
   default     = "mcr.microsoft.com/k8se/quickstart:latest"
 }
@@ -47,4 +47,16 @@ variable "container_memory" {
   description = "Memory per replica."
   type        = string
   default     = "0.5Gi"
+}
+
+variable "kv_name_prefix" {
+  description = "Key Vault name prefix; environment_name is appended. GLOBALLY unique, 3-24 chars total, alphanumeric and hyphens."
+  type        = string
+  default     = "kv-cdemo-molly-" # becomes kv-cdemo-molly-dev / -prod
+}
+
+variable "storage_name_prefix" {
+  description = "Storage account name prefix; environment_name is appended. GLOBALLY unique, 3-24 chars total, lowercase alphanumeric ONLY (no hyphens)."
+  type        = string
+  default     = "stcdemomolly" # becomes stcdemomollydev / stcdemomollyprod
 }
