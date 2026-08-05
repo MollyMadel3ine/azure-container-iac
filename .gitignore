@@ -11,6 +11,8 @@ crash.log
 # Variable files that may hold real values/secrets
 *.tfvars
 *.tfvars.json
+!dev.tfvars
+!prod.tfvars
 
 # Lock info files
 .terraform.tfstate.lock.info
