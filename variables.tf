@@ -60,3 +60,9 @@ variable "storage_name_prefix" {
   type        = string
   default     = "stcdemomolly" # becomes stcdemomollydev / stcdemomollyprod
 }
+
+variable "alert_email" {
+  description = "Email address that receives alert notifications."
+  type        = string
+  default     = "mollymlindquist@gmail.com"
+}
