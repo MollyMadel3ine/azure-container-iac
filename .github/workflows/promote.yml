@@ -1,0 +1,206 @@
+# ------------------------------------------------------------------
+# .github/workflows/promote.yml
+#
+# GitHub Actions port of the Azure DevOps promotion pipeline.
+# Phase 1: stored-secret auth (repo secrets), same flow as DevOps:
+#   validate -> build -> deploy dev -> plan prod -> [gate] -> apply prod
+# Phase 2 replaces the stored secret with OIDC federation.
+#
+# COEXISTENCE with the DevOps pipeline (same repo, both alive):
+#   - Pull requests here run validate + a build WITHOUT push
+#     (no cloud contact, no registry pollution from PR builds)
+#   - The FULL promotion runs only on manual trigger
+#     (workflow_dispatch) - so a push to main does not double-deploy
+#     via both systems. Once Actions earns trust, the main trigger
+#     moves here and the DevOps pipeline is parked.
+# ------------------------------------------------------------------
+
+name: promote
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {} # manual full promotion, from the Actions tab
+
+# Never let two promotions run at once - they would fight over
+# Terraform state locks (and each other).
+concurrency:
+  group: promotion
+  cancel-in-progress: false
+
+env:
+  ACR_NAME: acrcontainerdemomolly
+  ACR_SERVER: acrcontainerdemomolly.azurecr.io
+  IMAGE_REPO: container-demo
+  FULL_IMAGE: acrcontainerdemomolly.azurecr.io/container-demo:${{ github.sha }}
+  TF_VERSION: 1.9.8
+  # Terraform auth - consumed by the azurerm provider directly:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  # ----------------------------------------------------------------
+  validate:
+    name: Validate and security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          # The wrapper mangles raw output parsing (terraform output -raw)
+          # in later jobs; disabled everywhere for consistency.
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: tfsec security scan (pinned)
+        run: |
+          TFSEC_VERSION=1.28.11
+          curl -sSL -o /tmp/tfsec https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/tfsec-linux-amd64
+          chmod +x /tmp/tfsec && sudo mv /tmp/tfsec /usr/local/bin/tfsec
+          tfsec . --no-color
+
+  # ----------------------------------------------------------------
+  build:
+    name: Build image (push only on promotion)
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build
+        run: docker build -t $FULL_IMAGE .
+
+      # PRs stop here: the image builds (proving the Dockerfile) but
+      # never touches the registry. Only manual promotions push.
+      - name: az login (SP)
+        if: github.event_name == 'workflow_dispatch'
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+
+      - name: push to ACR
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          az acr login --name $ACR_NAME
+          docker push $FULL_IMAGE
+
+  # ----------------------------------------------------------------
+  deploy-dev:
+    name: Deploy dev (auto) and smoke test
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: init (dev state)
+        run: terraform init -backend-config="key=container-app-dev.tfstate"
+
+      - name: plan and apply dev
+        run: |
+          set -e
+          terraform plan -input=false -var-file=dev.tfvars -var="container_image=$FULL_IMAGE" -out=devplan
+          terraform show -no-color devplan
+          terraform apply -input=false devplan
+
+      - name: smoke test dev
+        run: |
+          APP_URL=$(terraform output -raw app_url)
+          echo "Smoke testing dev: ${APP_URL}/health"
+          for i in $(seq 1 10); do
+            RESPONSE=$(curl -s -w "\n%{http_code}" "${APP_URL}/health" || true)
+            BODY=$(echo "$RESPONSE" | head -n -1); CODE=$(echo "$RESPONSE" | tail -n 1)
+            echo "attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ] && echo "$BODY" | grep -q "${{ github.sha }}" && echo "$BODY" | grep -q '"environment":"dev"'; then
+              echo "DEV smoke test PASSED"; exit 0
+            fi
+            sleep 15
+          done
+          echo "DEV smoke test FAILED"; echo "Last body: $BODY"; exit 1
+
+  # ----------------------------------------------------------------
+  plan-prod:
+    name: Plan prod (for review)
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: init (prod state)
+        run: terraform init -backend-config="key=container-app-prod.tfstate"
+
+      - name: plan prod
+        run: |
+          set -e
+          terraform plan -input=false -var-file=prod.tfvars -var="container_image=$FULL_IMAGE" -out=prodplan
+          terraform show -no-color prodplan
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prodplan
+          path: prodplan
+
+  # ----------------------------------------------------------------
+  apply-prod:
+    name: Promote to prod (gated) and smoke test
+    runs-on: ubuntu-latest
+    needs: plan-prod
+    if: github.event_name == 'workflow_dispatch'
+    # The gate: this GitHub environment carries a required-reviewer
+    # rule (Settings -> Environments -> prod -> Required reviewers).
+    # The job pauses here until approved - the Prod1 pattern, ported.
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: prodplan
+
+      - name: init (prod state)
+        run: terraform init -backend-config="key=container-app-prod.tfstate"
+
+      - name: apply reviewed prod plan
+        run: terraform apply -input=false prodplan
+
+      - name: smoke test prod
+        run: |
+          APP_URL=$(terraform output -raw app_url)
+          echo "Smoke testing prod: ${APP_URL}/health"
+          for i in $(seq 1 10); do
+            RESPONSE=$(curl -s -w "\n%{http_code}" "${APP_URL}/health" || true)
+            BODY=$(echo "$RESPONSE" | head -n -1); CODE=$(echo "$RESPONSE" | tail -n 1)
+            echo "attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ] && echo "$BODY" | grep -q "${{ github.sha }}" && echo "$BODY" | grep -q '"environment":"prod"'; then
+              echo "PROD smoke test PASSED - promotion complete"; exit 0
+            fi
+            sleep 15
+          done
+          echo "PROD smoke test FAILED"; echo "Last body: $BODY"; exit 1
