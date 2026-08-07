@@ -2,7 +2,7 @@
 # .github/workflows/promote.yml
 #
 # GitHub Actions port of the Azure DevOps promotion pipeline.
-# Phase 1: stored-secret auth (repo secrets), same flow as DevOps:
+# Phase 1: stored-secret authentication (repo secrets), same flow as DevOps:
 #   validate -> build -> deploy dev -> plan prod -> [gate] -> apply prod
 # Phase 2 replaces the stored secret with OIDC federation.
 #
