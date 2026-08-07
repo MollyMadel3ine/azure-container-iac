@@ -17,6 +17,10 @@
 
 name: promote
 
+permissions:
+  id-token: write
+  contents: read
+
 on:
   pull_request:
     branches: [main]
@@ -34,9 +38,12 @@ env:
   IMAGE_REPO: container-demo
   FULL_IMAGE: acrcontainerdemomolly.azurecr.io/container-demo:${{ github.sha }}
   TF_VERSION: 1.9.8
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   # Terraform auth - consumed by the azurerm provider directly:
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
@@ -83,11 +90,13 @@ jobs:
 
       # PRs stop here: the image builds (proving the Dockerfile) but
       # never touches the registry. Only manual promotions push.
-      - name: az login (SP)
+      - name: az login (OIDC)
         if: github.event_name == 'workflow_dispatch'
         uses: azure/login@v2
         with:
-          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: push to ACR
         if: github.event_name == 'workflow_dispatch'
