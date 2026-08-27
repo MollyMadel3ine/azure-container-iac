@@ -2,7 +2,7 @@
 
 A containerized Python service on Azure Container Apps, promoted through dev and prod environments by a gated pipeline, authenticating to every Azure resource it touches — the container registry, Key Vault, and Blob Storage — as a **managed identity**, and observed through per-environment Log Analytics and Azure Monitor alerts. No passwords, keys, or connection strings exist anywhere in this system: not in code, not in configuration, not in Terraform state for the app's access, and not on the registry (admin credentials are disabled — they don't merely go unused, they don't exist).
 
-A deliberate companion to [azure-webapp-iac](https://github.com/MollyMadel3ine/azure-webapp-iac): where that project's security boundary is the **network** (private endpoints, VNet-scoped DNS, no public data paths), this project's boundary is **identity** (RBAC-only access, short-lived tokens, nothing stealable). Together they cover the two dominant Azure security postures — and the trade-offs between them are documented, not hidden.
+A deliberate companion to [azure-webapp-iac](https://github.com/MollyMadel3ine/azure-webapp-iac): where that project's security boundary is the **network** (private endpoints, VNet-scoped DNS, no public data paths), this project's boundary is **identity** (RBAC-only access, short-lived tokens, nothing stealable). Together they cover the two dominant Azure security postures — and the trade-offs between them are documented.
 
 **Status: complete.** All five phases shipped and verified.
 
